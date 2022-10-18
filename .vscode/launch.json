@@ -20,7 +20,7 @@
             ]
         },
            {
-            "name": "Python: Payload body checker",
+            "name": "Python: test mode",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}\\restler\\restler.py",
@@ -28,13 +28,16 @@
                 "--fuzzing_mode",
                 "directed-smoke-test",
                 "--restler_grammar",
-                "c:\\restler\\restlerpayloadbody\\compile\\grammar.py",
+                "d:\\demo\\restler_working_dir\\Compile\\grammar.py",
                 "--custom_mutations",
-                "c:\\restler\\restlerpayloadbody\\compile\\dict.json",
+                "d:\\demo\\restler_working_dir\\Compile\\dict.json",
                 "--settings",
-                "c:\\restler\\restlerpayloadbody\\settings_custom.json",
-                "--enable_checkers",
-                "payloadbody",
+                "d:\\demo\\restler_working_dir\\Compile\\engine_settings.json",
+                "--no_ssl",
+                "--host",
+                "localhost",
+                "--target_port",
+                "8888",
                 "--garbage_collection_interval",
                 "30"
             ]
