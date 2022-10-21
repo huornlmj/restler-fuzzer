@@ -446,23 +446,16 @@ class GarbageCollector:
         from utils.logger import garbage_collector_logging as CUSTOM_LOGGING
         from engine.core import request_utilities
 
-        try:
-            gc_sock = threadLocal.gc_sock
-        except AttributeError:
-            # Socket not yet initialized.
-            threadLocal.gc_sock = HttpSock(Settings().connection_settings)
-            gc_sock = threadLocal.gc_sock
-
-        # For each object in the overflowing area, whose destructor is
-        # available, render the corresponding request, send the request,
-        # and then check the status code. If the resource has been determined
-        # to be removed, delete the object from the overflow area.
-        # At the end keep track of only up to @param max_aged_objects
-        # remaining objects.
-        for type in destructors:
-            destructor = destructors[type]
-            deleted_list = []
+        def process_async_deletes():
             async_deleted_list = []
+            # Try to async poll for 1 second, unless GC has been requested after every sequence.
+            # When GC runs after every sequence, complete clean-up is desired, so wait for the resource
+            # to be deleted for the full the async timeout.
+            async_timeout = 1.1
+            if Settings().run_gc_after_every_sequence:
+                # Wait until the async deletions have completed.
+                async_timeout = Settings().max_async_resource_creation_time
+                pass
 
             if self.async_deletions[type]:
                 CUSTOM_LOGGING("{}: Polling for status of garbage collection of * {} * objects".\
@@ -472,21 +465,33 @@ class GarbageCollector:
             for value, (rendered_delete_request, response) in self.async_deletions[type]:
 
                 # Get the request used for polling the resource availability
-                responses_to_parse, resource_error, _ = try_async_poll(
-                    request_data=rendered_delete_request, response=response, max_async_wait_time=1.1,
+                responses_to_parse, resource_error, polling_attempted = try_async_poll(
+                    request_data=rendered_delete_request, response=response, max_async_wait_time=async_timeout,
                     poll_delete_status=True)
 
-                status_code = None if not responses_to_parse else responses_to_parse[0].status_code
-                if resource_error or status_code in DELETED_CODES:
-                    # The delete operation has finished.
-                    status_str = str(status_code)
+                if polling_attempted:
+                    status_code = None if not responses_to_parse else responses_to_parse[0].status_code
+                    if resource_error or status_code in DELETED_CODES:
+                        # The delete operation has finished.
+                        status_str = str(status_code)
+                        if status_str not in self.gc_stats[type]:
+                            self.gc_stats[type][status_str] = 0
+                        self.gc_stats[type][status_str] += 1
+                        async_deleted_list.append(value)
+                        if status_code not in DELETED_CODES:
+                            self.num_failed_deletions += 1
+                else:
+                    # Polling location was not found in the response.
+                    # Assume the object has been successfully deleted.
+                    async_deleted_list.append(value)
+                    status_str = str(response.status_code)
                     if status_str not in self.gc_stats[type]:
                         self.gc_stats[type][status_str] = 0
                     self.gc_stats[type][status_str] += 1
-                    async_deleted_list.append(value)
-                    if status_code not in DELETED_CODES:
-                        self.num_failed_deletions += 1
+            return async_deleted_list
 
+        def process_overflowing():
+            deleted_list = []
             if self.overflowing[type]:
                 CUSTOM_LOGGING("{}: Trying garbage collection of * {} * objects".\
                 format(formatting.timestamp(), len(self.overflowing[type])))
@@ -531,6 +536,25 @@ class GarbageCollector:
                         self.async_deletions[type].append((value, (fully_rendered_data, response)))
                         deleted_list.append(value)
                         self.gc_stats[type][status_str] += 1
+            return deleted_list
+
+        try:
+            gc_sock = threadLocal.gc_sock
+        except AttributeError:
+            # Socket not yet initialized.
+            threadLocal.gc_sock = HttpSock(Settings().connection_settings)
+            gc_sock = threadLocal.gc_sock
+
+        # For each object in the overflowing area, whose destructor is
+        # available, render the corresponding request, send the request,
+        # and then check the status code. If the resource has been determined
+        # to be removed, delete the object from the overflow area.
+        # At the end keep track of only up to @param max_aged_objects
+        # remaining objects.
+        for type in destructors:
+            destructor = destructors[type]
+            deleted_list = process_overflowing()
+            async_deleted_list = process_async_deletes()
 
             # Remove deleted items from the to-delete cache
             for value in deleted_list:
@@ -538,7 +562,7 @@ class GarbageCollector:
 
             # Remove the items that failed to be deleted based on their async status
             self.async_deletions[type] =\
-                [(val, x) for (val,x) in self.async_deletions[type] if val not in async_deleted_list]
+                [(val, x) for (val, x) in self.async_deletions[type] if val not in async_deleted_list]
 
             # Check how many objects are left in the overflowing list
             # If there are more than the allowed number of objects, terminate the run
